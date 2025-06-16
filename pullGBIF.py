@@ -31,6 +31,10 @@ Python Environment: PCM_VegClimateVA - Python 3.11
 
 Date Developed - May 2024
 Created By - Kirk Sherrill - Data Scientist/Manager San Francisco Bay Area Network Inventory and Monitoring
+
+Updates:
+5/28/2025 - Added clipAOA variable and workflow to clipped occurrences to a defined AOA (e.g. California Floristic Province
+and export to a GIS file.
 """
 
 import pandas as pd
@@ -41,18 +45,20 @@ import traceback
 from datetime import datetime
 from pygbif import species
 from pygbif import occurrences as occ
+import geopandas as gpd
+from shapely.geometry import Point
 
 # File (Excel/CSV) with vegtation taxon to be idenfities
-inTable = r'C:\Users\KSherrill\OneDrive - DOI\SFAN\Climate\VulnerabilityAssessment\PCM\ReferenceTaxon\PCM_ReferenceTaxon_20240604.xlsx'
+inTable = r'C:\Users\KSherrill\DOI\NPS-IMD-SFAN - Documents\Plant Communities\DataAnalysis\PCM_CCVA\TaxonOfInterest_20250605.xlsx'
 # Worksheet to process if the inTable is an excel file
 inWorksheet = 'ReferenceTaxon'
 # Field in the Vegetation worksheet that defined the scientific name
 lookupField = 'Species'
 
 # Output Name, OutDir, and Workspace
-outName = 'PCM_Reference_GBIF'  # Output name for excel file and logile
-outDir = r'C:\Users\KSherrill\OneDrive - DOI\SFAN\Climate\VulnerabilityAssessment\GBIF\ReferenceTaxon'  # Directory Output Location
-workspace = f'{outDir}\\workspace'  # Workspace Output Directory
+outName = 'PCM_SpeciesOfInterest_GBIF'  # Output name for excel file and logile
+outDir = r'C:\Users\KSherrill\OneDrive - DOI\SFAN\VitalSigns\PlantCommunities\Scripts\PCM_ClimateVA_Sensitivity\data\raw-data\GBIF'  # Directory Output Location
+workspace = r'C:\Users\KSherrill\OneDrive - DOI\SFAN\VitalSigns\PlantCommunities\Scripts\PCM_ClimateVA_Sensitivity\Python\workspace'  # Workspace Output Directory
 dateNow = datetime.now().strftime('%Y%m%d')
 logFileName = f'{workspace}\\{outName}_{dateNow}.LogFile.txt'  # Name of the .txt script logfile which is saved in the workspace directory
 
@@ -66,13 +72,24 @@ fieldsToRetain = ['key', 'taxonKey', 'scientificName', 'basisOfRecord', 'taxonom
                   'decimalLatitude', 'decimalLongitude', 'continent', 'stateProvince', 'country', 'datasetName',
                   'institutionCode']
 
+# GBIF/DOI Certificate must be exported from the GBIF site in Chrome and defined prior to processing to avoid being
+# blocked by the NPS Firewall.  Got to https://api.gbif.org/ and export the Parent/Top Cert DOIRootCA2.crt.
+gbifCert = r'C:\Users\KSherrill\OneDrive - DOI\SFAN\Python\Certificates\DOIRootCA2.crt'
+
+# GIS file in WGS 84 to which occurrence data will be clipped and exported
+clipAOA = "Yes"   # Define if clipping to AOA is desired
+clipAOAPath = r'C:\Users\KSherrill\OneDrive - DOI\SFAN\VitalSigns\PlantCommunities\Scripts\PCM_ClimateVA_Sensitivity\data\raw-data\GBIF\CaliforniaFloristicProvince\CFP_GIS_WGS_84_Dissolve.shp'
+
 def main():
     try:
         session_info.show()
 
+        # Import Certificate:
+        os.environ["REQUESTS_CA_BUNDLE"] = gbifCert
+
         outDFList = []
         ########################
-        #Read in the Taxon Table
+        # Read in the Taxon Table
         ########################
 
         inFormat = os.path.splitext(inTable)[1]
@@ -81,17 +98,17 @@ def main():
             inDF = pd.read_excel(inTable, sheet_name=inWorksheet)
 
         #########################################################
-        #Hit the GBIF Species Module to get the GBIF Taxon Key/ID
+        # Hit the GBIF Species Module to get the GBIF Taxon Key/ID
         #########################################################
 
         outFun = processTaxonomy(inDF, lookupField)
         if outFun[0].lower() != "success function":
-            messageTime = timeFun()
-            print("WARNING - Function getTaxonomy - " + messageTime + " - Failed - Exiting Script")
-            exit()
+             messageTime = timeFun()
+             print("WARNING - Function getTaxonomy - " + messageTime + " - Failed - Exiting Script")
+             exit()
 
         DFSpeciesTaxonomy = outFun[1]
-        #Export Dataframe with the Defined GBIF Species Fields
+        # Export Dataframe with the Defined GBIF Species Fields
         outSpeciesList = f'{outDir}\\{outName}_Species_{dateNow}.csv'
         DFSpeciesTaxonomy.to_csv(outSpeciesList)
 
@@ -101,26 +118,38 @@ def main():
 
         outFun = processOccurrence(DFSpeciesTaxonomy,  chunkSize, totalRecords, fieldsToRetain)
         if outFun[0].lower() != "success function":
-            messageTime = timeFun()
-            print("WARNING - Function processOccurrence - " + messageTime + " - Failed - Exiting Script")
-            exit()
-        #Output Occurrence Dataframe
+             messageTime = timeFun()
+             print("WARNING - Function processOccurrence - " + messageTime + " - Failed - Exiting Script")
+             exit()
+        # Output Occurrence Dataframe
         outDFOccurrenceList = outFun[1]
 
-        ####################
-        #Export Occurrence Dataframes.  Occurrence dataframe will be subset as well
-        #Option to remove fields
-        outPathName = f'{outDir}\\{outName}_Occurrences_{dateNow}.csv'
+        #########################################################
+        # Export DataFrame to GIS File, and clip to define clip extent via variable clipAOA
+        #########################################################
+        if clipAOA.lower() == 'yes':
 
-        # Export to .csv file
-        outDFOccurrenceList.to_csv(outPathName)
+            outFun = clipAOAFun(outDFOccurrenceList, clipAOAPath)
+            if outFun.lower() != "success function":
+                messageTime = timeFun()
+                print("WARNING - Function clipAOAFun - " + messageTime + " - Failed - Exiting Script")
+                exit()
 
-        messageTime = timeFun()
-        scriptMsg = f'Successfully Exported Occurrence Records - {outPathName} - {messageTime}'
-        print(scriptMsg)
-        logFile = open(logFileName, "a")
-        logFile.write(scriptMsg + "\n")
-        logFile.close()
+        else:
+            ####################
+            # Export Occurrence Dataframes.  Occurrence dataframe will be subset as well
+            # Option to remove fields
+            outPathName = f'{outDir}\\{outName}_Occurrences_{dateNow}.csv'
+
+            # Export to .csv file
+            outDFOccurrenceList.to_csv(outPathName)
+
+            messageTime = timeFun()
+            scriptMsg = f'Successfully Exported Occurrence Records - {outPathName} - {messageTime}'
+            print(scriptMsg)
+            logFile = open(logFileName, "a")
+            logFile.write(scriptMsg + "\n")
+            logFile.close()
 
     except:
         messageTime = timeFun()
@@ -168,8 +197,18 @@ def processOccurrence(inDF, chunkSize, totalRecords, fieldToRetain):
                 exit()
             #
             outGBIFOccurrence = outFun[1]
-            #Add the Occurrence Dataframe to the list to be compiled across all taxon
-            outDFOccurrenceList.append(outGBIFOccurrence)
+
+            if outGBIFOccurrence.shape[0] >= 1:
+                #Add the Occurrence Dataframe to the list to be compiled across all taxon
+                outDFOccurrenceList.append(outGBIFOccurrence)
+            else:
+                messageTime = timeFun()
+                scriptMsg = f'WARNING No Records harvested from GBIF - {GBIFKeyLU} - for Taxon - {taxonLU}- {messageTime}'
+                print(scriptMsg)
+                logFile = open(logFileName, "a")
+                logFile.write(scriptMsg + "\n")
+                logFile.close()
+
             messageTime = timeFun()
             scriptMsg = f'Successfully ProcessOccurrence Data for - {GBIFKeyLU} - for Taxon - {taxonLU }- {messageTime}'
             print(scriptMsg)
@@ -183,8 +222,8 @@ def processOccurrence(inDF, chunkSize, totalRecords, fieldToRetain):
         #Subset to the CONUS Bounding Box, the GBIF Occurences API isn't honoring the bounding box extent
         # criteria.  Using the CONUS bounding box which is the extent of the NPS WB data
         # Define the bounding box
-        min_lat, max_lat = 26.0, 49.0
-        min_lon, max_lon = -125.0, -66.0
+        min_lat, max_lat = 29.0, 44.0
+        min_lon, max_lon = -125.0, -114.0
 
         # Filter out records to only the CONUS bounding box
         DFOccurrencesLatLon = DFOccurrences[((DFOccurrences['decimalLatitude'] >= min_lat)
@@ -208,9 +247,9 @@ def getOccurrence(GBIFKey, taxonLU, chunkSize, totalRecords, fieldsToRetain, Veg
     taxonKey = GBIF Key
     hasCoordinates = True
     publishingCountry = US
-    decimdalLatitude = between 49 and 26 degrees
-    decimalLongitude = between -66 and -125
-    years 1990-2024
+    decimdalLatitude = between 29 and 44 degrees
+    decimalLongitude = between -114 and -125
+    years 2013-2024
 
 
     Option to return more GBIF Occurrence information if desired see API info:
@@ -232,7 +271,7 @@ def getOccurrence(GBIFKey, taxonLU, chunkSize, totalRecords, fieldsToRetain, Veg
         #Use the GBIF pygbif occurrences.search to download by Chunks limited to 300 records per API pull
         for offset in range(0, totalRecords, chunkSize):
             occurrence_data = occ.search(taxonKey=GBIFKey, hasCoordinate=True, publishingCountry='US',
-                                         decimdalLatitude='26,49', decimalLongitude='-125,-66', year='1990,2024',
+                                         decimdalLatitude='29,44', decimalLongitude='-125,-114', year='1980,2024',
                                          limit=chunkSize, offset=offset)
             #Pull Results Key to Dictionary
             results = occurrence_data['results']
@@ -247,14 +286,16 @@ def getOccurrence(GBIFKey, taxonLU, chunkSize, totalRecords, fieldsToRetain, Veg
 
         outGBIFOccurrence = pd.DataFrame(occurrencList)
 
-        # Subset to the desired fields
-        outGBIFOccurrence = outGBIFOccurrence.loc[:, fieldsToRetain]
+        recCount = outGBIFOccurrence.shape[0]
+        if recCount >= 1:
+            # Subset to the desired fields
+            outGBIFOccurrence = outGBIFOccurrence.loc[:, fieldsToRetain]
 
-        #Add 'VegCode' field
-        outGBIFOccurrence.insert(2, 'VegCode', VegCodeLU)
+            #Add 'VegCode' field
+            outGBIFOccurrence.insert(2, 'VegCode', VegCodeLU)
 
-        #Add 'VegCode' field
-        outGBIFOccurrence.insert(3, 'scientificNameLookup', taxonLU)
+            #Add 'ScientificName' field
+            outGBIFOccurrence.insert(3, 'scientificNameLookup', taxonLU)
 
         return 'success function', outGBIFOccurrence
     except:
@@ -365,6 +406,78 @@ def getTaxonomy(taxonLU):
         return 'success function', outGBIFSpecies
     except:
         print(f'Failed - getTaxonomy')
+        exit()
+
+def clipAOAFun(inDF, clipAOAPath):
+    """
+    Clip the passed dataframe to the clopAOAPath GIS file.  Expecting a shapefile.
+    Processing will export a shapefile of the passed dataframe before the clip and after the clip
+
+    :param inDF: Dateframe with the GBIF data
+    :param clipAOAPath: Full path to the GIS file with the Area of Analysis clipping extent in WGS 84 coordinate system
+
+    :return: clipped_gdf: Dataframe clipped to the extent, and export of pre and post clip .shp files.
+    match.
+
+    """
+    try:
+
+        # Create geometry column from lat/lon
+        geometry = [Point(xy) for xy in zip(inDF['decimalLongitude'], inDF['decimalLatitude'])]
+
+        # Create GeoDataFrame
+        gdf = gpd.GeoDataFrame(inDF, geometry=geometry, crs="EPSG:4326")
+
+        # Set CRS to WGS84 (EPSG:4326)
+        gdf.set_crs(epsg=4326, inplace=True)
+
+        # Export to geopackage
+        outPathName = f'{outDir}\\{outName}_Occurrences_{dateNow}.gpkg'
+        layerName = f'PreClip_Occurrences'
+        gdf.to_file(outPathName, layer=layerName, driver="GPKG")
+
+        print(f"Pre clipped saved to: {outPathName} - LayerName: {layerName}")
+
+        #
+        # Next clip to the AOA
+        #
+
+        # Read the clip polygon shapefile
+        clipAOA = gpd.read_file(clipAOAPath)
+
+        # Ensure CRS matches
+        clipAOA = clipAOA.to_crs(gdf.crs)
+
+        # Clip points to polygon
+        clipped_gdf = gpd.clip(gdf, clipAOA)
+
+        layerName = f'Clipped_Occurrences'
+
+        # Save the clipped result (optional)
+        clipped_gdf.to_file(outPathName, layer=layerName, driver="GPKG")
+
+        print(f"Clipped layer saved to: {outPathName} - LayerName: {layerName}")
+
+        #
+        # Export the clipped data to a .csv file
+        #
+        outPathNameCSV = f'{outDir}\\{outName}_Occurrences_{dateNow}.csv'
+
+        # Export to .csv file
+        clipped_gdf.drop(columns='geometry').to_csv(outPathNameCSV, index=False)
+
+        print(f"Exported Post Clip Shapefile to .csv file: {outPathNameCSV}")
+        messageTime = timeFun()
+        scriptMsg = f'Successfully Exported Occurrence Records clipped to AOA - {outPathNameCSV} - {messageTime}'
+        print(scriptMsg)
+        logFile = open(logFileName, "a")
+        logFile.write(scriptMsg + "\n")
+        logFile.close()
+
+        return 'success function'
+
+    except:
+        print(f'Failed - clipAOAFun')
         exit()
 
 def timeFun():
